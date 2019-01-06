@@ -1,0 +1,189 @@
+---
+title: "Practical Machine Learning - Course Project"
+author: "Ignacio Ojea"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# INSTRUCTIONS
+
+## What you should submit
+
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases.
+
+
+# Downloading and Normalizing Data
+
+Let us start by loading the relevant libraries
+```{r, message=FALSE}
+library(caret); library(ggplot2); library(forecast); library(elasticnet)
+```
+
+Now I proceed to domwload and read the data and look at the relevant variable:
+
+```{r}
+training <- read.csv("pml-training.csv", na.strings=c('NA','','#DIV/0!'))
+testing <- read.csv("pml-testing.csv", na.strings=c('NA','','#DIV/0!'))
+class(training$classe)
+summary(training$classe)
+```
+
+Reading the basics about the information provided via http://groupware.les.inf.puc-rio.br/har, we get that the "classe" variable corresponds to:
+
+- Exactly according to the specification (Class A),
+- Throwing the elbows to the front (Class B), 
+- Lifting the dumbbell only halfway (Class C), 
+- Lowering the dumbbell only halfway (Class D), and 
+- Throwing the hips to the front (Class E).
+
+A glance at the data shows that there are 160 variables, and plenty of missing values (NAs and also #DIV/0!) which I coerced to NAs before). So it is reasonable to begin by considering only variables which have no NAs in them.
+
+```{r}
+NAindex <- apply(training,2,function(x) {sum(is.na(x))})
+training <- training[,which(NAindex == 0)]
+NAindex <- apply(testing,2,function(x) {sum(is.na(x))})
+testing <- testing[,which(NAindex == 0)]
+table(complete.cases(training))
+table(complete.cases(testing))
+```
+
+Furthermore:
+
+- The first column is not really a variable, it just contains the row number.
+- The second is the user_name variable, which should not be relevant in our study.
+- Third to seventh column correspond to the variables related to the time window for that particular sensor reading.
+
+In a nutshell, we want to select only the variables that correspond to the sensors.
+
+```{r}
+sensorColumns <- grep(pattern = "_belt|_arm|_dumbbell|_forearm|classe", names(training))
+training <- training[, sensorColumns]
+testing <- testing[, sensorColumns]
+dim(training)
+```
+So in fact we are left with all but the first seven columns.
+We also notice that all variables except classe are numeric.
+
+```{r}
+table(sapply(training[1,], class))
+```
+
+# Data Splitting
+
+We split the data with the usual 75% so that we can estimate the out of sample error of our predictor. Seed is set for reproducibility.
+
+```{r}
+set.seed(23122018)
+raw.training <- training #rename to preserve the original data
+inTrain <- createDataPartition(raw.training$classe, p=0.75, list=FALSE)
+training <- raw.training[inTrain,]
+crossvalidation <- raw.training[-inTrain,]
+```
+
+# Model Construction and Selection
+
+## Model Construction
+
+*For the sake of exhaustion*, I will be using using a random forest ("rf"), boosted trees ("gbm"), linear discriminant analysis ("lda") models, linear support vector machines ("svmLinear"), and finally recursive partitioning for classification, regression and survival trees ("rpart"). This might be computationally demanding, but it shows knowledge (and was the suggested strategy in the final Quiz).
+
+In a final addenda at the end I show that combining models by stacking predictions together using random forests ("rf") does not present a significant improvement.
+
+To reduce the risk of overfitting, a 10-fold cross validation is employed during model building.
+
+The Kappa metric is selected as the comparison criteria.
+
+```{r}
+mod.rf <- train(classe ~., method="rf", data=training, metric="Kappa", trControl=trainControl(method='cv',number=10))
+mod.gbm <- train(classe~., data=training, method="gbm", metric="Kappa",trControl=trainControl(method='cv',number=10),verbose=FALSE)
+mod.lda <- train(classe~., data=training, method="lda", metric="Kappa",trControl=trainControl(method='cv',number=10))
+mod.svmLinear <- train(classe~., data=training, method="svmLinear", metric="Kappa",trControl=trainControl(method='cv',number=10))
+mod.rpart <- train(classe~., data=training, method="rpart", metric="Kappa",trControl=trainControl(method='cv',number=10))
+```
+
+Now let us combine the models using the crossvalidation data set. Using the original testing set here would be methodologically incorrect. The predictions are stacked together using random forests.
+
+## Model Selection
+
+The models are then compared using the resamples function from the Caret package.
+
+```{r}
+library(lattice)
+r.values <- resamples(list(rf=mod.rf,gbm=mod.gbm,lda=mod.lda,mod.rpart,mod.svmLinear))
+summary(r.values)
+```
+
+Based on the display above, it can be determined that the Random Forest model outperforms the others by having a Kappa mean value of 0.991 and a mean accuracy of 0.993. I will therefore select it.
+
+# Accuracy on training set and cross validation set
+
+```{r}
+rf.pred <- predict(mod.rf, training)
+confusionMatrix(training$classe,rf.pred)$overall['Accuracy']
+```
+
+Now let us do the same but with the crossvalidation set and without subsetting so that the corresponding statistics and error rates are shown.
+
+```{r}
+rf.cross.pred <- predict(mod.rf, crossvalidation)
+confusionMatrix(crossvalidation$classe,rf.cross.pred)
+```
+
+Not bad! We have an accuracy of 0.995 and a Kappa of 0.993. So the predictor seems to have a low out of sample error rate.
+
+# Results
+
+Finally, we shall use the selected model to predict the classification of the testing set provided. In addition, in
+accordance to submission instructions.
+
+```{r}
+final.prediction <- predict(mod.rf, testing)
+print(as.data.frame(final.prediction))
+```
+
+# Addenda: Combining models presents no significant improvement
+
+Now let us combine the models using the crossvalidation data set. We will later compare the combined model with our Random Forest model using resampling and in the crossvalidation data set.
+
+```{r}
+pred.rf <- predict(mod.rf, crossvalidation)
+pred.gbm <- predict(mod.gbm, crossvalidation)
+pred.lda <- predict(mod.lda, crossvalidation)
+pred.rpart <- predict(mod.rpart,crossvalidation)
+pred.svmLinear <- predict(mod.svmLinear,crossvalidation)
+predDF <- data.frame(pred.rf, pred.gbm, pred.lda, pred.rpart, pred.svmLinear, classe = crossvalidation$classe)
+combMod <- train(classe ~ ., method = "rf", data = predDF,metric="Kappa",trControl=trainControl(method='cv',number=10))
+```
+
+Once again, the two models are then compared using the resamples function from the Caret package.
+
+```{r}
+library(lattice)
+r.values <- resamples(list(rf=mod.rf,comb=combMod))
+summary(r.values)
+```
+
+The difference between between the two models in median accuracy and in median Kappa is negligible.
+
+```{r}
+rf.cross.pred <- predict(mod.rf, crossvalidation)
+combM.cross.prediction <- predict(combMod,crossvalidation)
+confusionMatrix(crossvalidation$classe,rf.cross.pred)$overall['Accuracy']
+confusionMatrix(crossvalidation$classe,combM.cross.prediction)$overall['Accuracy']
+```
+
+Once again, this shows that combining models does not present a significant improvement.
+
+# References
+
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6.
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz5aVvDq0zU
+
+
